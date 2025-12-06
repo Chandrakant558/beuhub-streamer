@@ -18,7 +18,7 @@ API_ID = int(os.environ.get("API_ID", "33833846"))
 API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4")
 DEFAULT_CHAT_ID = int(os.environ.get("CHANNEL_ID", "-1003266040653"))
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024))  # keep <= 1MiB for stream_media
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024))  # <= 1MiB recommended for stream_media
 
 app = Client("beuhub_streamer", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -59,7 +59,7 @@ def get_media_details(message):
 async def stream_message(request, message, file_size, mime_type, file_name, start, end, is_partial):
     length = end - start + 1
 
-    # Build headers
+    # Prepare headers
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Disposition": f'inline; filename="{file_name}"'
@@ -78,7 +78,7 @@ async def stream_message(request, message, file_size, mime_type, file_name, star
         })
         status = 200
 
-    # If this is a HEAD request, return headers only
+    # If HEAD request, return headers-only response
     if request.method == "HEAD":
         return web.Response(status=status, headers=headers)
 
@@ -87,19 +87,16 @@ async def stream_message(request, message, file_size, mime_type, file_name, star
 
     logger.info(f"⬇️ Starting stream: bytes {start}-{end} (len={length}) for file '{file_name}'")
 
+    chunk_counter = 0
     try:
-        # Use Pyrogram's stream_media to get chunk-by-chunk bytes
-        # stream_media yields up to ~1MiB chunks; offset and limit are in BYTES (use offset=start and limit=length)
-        chunk_counter = 0
+        # Use Pyrogram's stream_media for chunked streaming (offset/limit in bytes)
         async for chunk in app.stream_media(message, offset=start, limit=length, chunk_size=CHUNK_SIZE):
             if not chunk:
                 break
             await resp.write(chunk)
             chunk_counter += 1
-            # light heartbeat log
             if chunk_counter % 8 == 0:
                 logger.info(f"✅ Sent {chunk_counter} chunks ({chunk_counter * CHUNK_SIZE} bytes approx)")
-
     except Exception as e:
         logger.error(f"❌ Streaming interrupted: {e}")
         logger.error(traceback.format_exc())
@@ -120,6 +117,7 @@ async def stream_handler(request):
     logger.info(f"🔔 REQUEST HIT: {request.method} {request.rel_url}")
 
     try:
+        # segments: e.g. ['', 'stream', '-1003266040653', '10'] when splitting path
         segments = [s for s in request.rel_url.path.split("/") if s]
 
         if len(segments) == 2:
@@ -174,8 +172,7 @@ async def init_app():
     server = web.Application()
     server.add_routes([
         web.get("/", home),
-        web.head("/stream/{id:.*}", stream_handler),  # support HEAD probes
-        web.get("/stream/{id:.*}", stream_handler),
+        web.get("/stream/{id:.*}", stream_handler),  # Do NOT add a separate web.head(...) route
     ])
     return server
 
