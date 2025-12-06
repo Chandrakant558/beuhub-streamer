@@ -3,7 +3,7 @@ import logging
 import traceback
 import sys
 from aiohttp import web
-from pyrogram import Client, filters # Filters add kiya hai
+from pyrogram import Client, filters
 
 # Logging setup
 logging.basicConfig(
@@ -15,15 +15,15 @@ logger = logging.getLogger("beuhub_streamer")
 
 # --- CONFIG ---
 API_ID = int(os.environ.get("API_ID", "33833846"))
-API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446"))
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4"))
-# Note: Hum ab environment variable par nirbhar nahi rahenge, khud ID dhundenge
+# FIX: Extra bracket removed below
+API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4")
 
 app = Client("beuhub_streamer", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 
 # --- 🕵️‍♂️ Jasoos (Spy) Handler ---
-# Ye function kisi bhi message ka ID print karega
-@app.on_message()
+# Jaise hi aap group mein message bhejenge, ye ID print karega
+@app.on_message(filters.chat(int(os.environ.get("CHANNEL_ID", "-1003266040653"))) | filters.private | filters.group)
 async def log_chat_id(client, message):
     logger.info(f"📩 NEW MESSAGE RECEIVED!")
     logger.info(f"✅ REAL CHAT ID IS: {message.chat.id}")
@@ -77,20 +77,22 @@ async def stream_message(request, message, media, file_size, mime_type, file_nam
 # --- Routes ---
 async def stream_handler(request):
     try:
-        # URL se ID nikalenge
         segments = [s for s in request.rel_url.path.split("/") if s]
         if len(segments) < 3: return web.Response(text="Use format: /stream/CHAT_ID/MESSAGE_ID", status=400)
         
-        chat_id = int(segments[1])
-        message_id = int(segments[2])
+        try:
+            chat_id = int(segments[1])
+            message_id = int(segments[2])
+        except ValueError:
+             # Handle username case (e.g. /stream/username/10)
+             chat_id = segments[1] 
+             message_id = int(segments[2])
 
-        # Message fetch karne ki koshish
         try:
             message = await app.get_messages(chat_id, message_id)
         except Exception as e:
-            # Agar direct fetch fail ho, toh shayad bot ko chat nahi mili
-            logger.error(f"Fetch Failed: {e}. Bot might need a message in the group to 'see' it.")
-            return web.Response(text=f"Telegram Error: {e} (Hint: Send a message in the group first!)", status=500)
+            logger.error(f"Fetch Failed: {e}")
+            return web.Response(text=f"Telegram Error: {e}. (Go to group and send 'Hello' to wake up bot!)", status=500)
 
         if not message: return web.Response(text="Message Not Found", status=404)
 
@@ -107,7 +109,10 @@ async def init_app():
     await app.start()
     logger.info("🤖 Bot Started! Waiting for messages to detect ID...")
     app_web = web.Application()
-    app_web.add_routes([web.get("/stream/{chat_id}/{message_id}", stream_handler)])
+    app_web.add_routes([
+        web.get("/", lambda r: web.Response(text="Server Running")),
+        web.get("/stream/{chat_id}/{message_id}", stream_handler)
+    ])
     return app_web
 
 def main():
