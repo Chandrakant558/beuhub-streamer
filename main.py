@@ -56,7 +56,7 @@ async def stream_message(request, message, media, file_size, mime_type, file_nam
     await resp.prepare(request)
     
     try:
-        async for chunk in app.download_media(message, offset=start, limit=length, chunk_size=1024*1024, in_memory=True):
+        async for chunk in app.download_media(message, offset=start, limit=length, chunk_size=720*1280, in_memory=True):
             await resp.write(chunk)
     except Exception as e:
         logger.error(f"Stream Error: {e}")
@@ -117,3 +117,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
