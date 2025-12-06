@@ -2,6 +2,7 @@
 import os
 import asyncio
 import logging
+import stat
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.errors import RPCError
@@ -10,32 +11,44 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("beuhub_streamer")
 
 # --- CONFIG (FROM ENV) ---
-# Defaults provided from user input (recommended: override with env vars in Render)
 API_ID = int(os.environ.get("API_ID", "33833846"))
 API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4")
-DEFAULT_CHAT_ID = os.environ.get("CHANNEL_ID", str(-1003266040653))  # keep as string
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024))  # 1MB default
+DEFAULT_CHAT_ID = os.environ.get("CHANNEL_ID", str(-1003266040653))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024))
 USE_IN_MEMORY = os.environ.get("USE_IN_MEMORY", "false").lower() == "true"
-# For large files it's safer to stream from disk (in_memory=False)
+
+# --- WORKDIR / SESSION DIR (IMPORTANT: ensure exists & writable) ---
+WORKDIR = os.environ.get("PYROGRAM_WORKDIR", "/tmp/pyrogram")
+try:
+    if not os.path.exists(WORKDIR):
+        os.makedirs(WORKDIR, exist_ok=True)
+        logger.info("Created workdir: %s", WORKDIR)
+    # try to ensure writable
+    if not os.access(WORKDIR, os.W_OK):
+        try:
+            os.chmod(WORKDIR, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            logger.info("Adjusted permissions for workdir: %s", WORKDIR)
+        except Exception as e:
+            logger.warning("Could not chmod workdir (%s): %s", WORKDIR, e)
+except Exception as e:
+    logger.exception("Failed to create or prepare workdir (%s): %s", WORKDIR, e)
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     logger.error("Missing API_ID / API_HASH / BOT_TOKEN in environment variables.")
-    # Requests will be rejected with 500 until correct creds are provided.
 
-# Create Pyrogram client (bot mode)
+# Create Pyrogram client (bot mode) using the prepared workdir
 app = Client(
     "beuhub_streamer",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="/tmp/pyrogram"
+    workdir=WORKDIR
 )
 
-
+# rest of the code is same as before...
 async def home(request):
     return web.Response(text="BEUHub MTProto Streamer is running ✓")
-
 
 def parse_range(range_header: str, file_size: int):
     if not range_header:
@@ -59,7 +72,6 @@ def parse_range(range_header: str, file_size: int):
     except Exception:
         return 0, file_size - 1
 
-
 async def stream_from_message(message, request, start: int, end: int):
     length = end - start + 1
     headers = {
@@ -72,12 +84,11 @@ async def stream_from_message(message, request, start: int, end: int):
     resp = web.StreamResponse(status=206, headers=headers)
     await resp.prepare(request)
 
-    # Use in_memory flag based on env setting. For very large files prefer in_memory=False.
     try:
         async for chunk in app.download_media(
             message,
             file_name=None,
-            in_memory=USE_IN_MEMORY,   # default false (safer)
+            in_memory=USE_IN_MEMORY,
             progress=None,
             chunk_size=CHUNK_SIZE,
             offset=start,
@@ -88,7 +99,6 @@ async def stream_from_message(message, request, start: int, end: int):
             await resp.write(chunk)
     except Exception as e:
         logger.exception("Error while streaming chunks: %s", e)
-        # fallthrough -> attempt to close gracefully
     finally:
         try:
             await resp.write_eof()
@@ -96,7 +106,6 @@ async def stream_from_message(message, request, start: int, end: int):
             pass
 
     return resp
-
 
 async def get_message_by_id(chat_identifier, message_id):
     try:
@@ -106,16 +115,14 @@ async def get_message_by_id(chat_identifier, message_id):
         logger.exception("get_messages failed: %s", e)
         raise
 
-
 async def stream_handler(request):
     if not BOT_TOKEN or not API_ID or not API_HASH:
         return web.Response(status=500, text="Server misconfigured: missing TELEGRAM credentials")
 
-    raw = request.rel_url.path  # e.g. /stream/-100123/456 or /stream/<id>
+    raw = request.rel_url.path
     segments = [s for s in raw.split("/") if s]
     try:
         if len(segments) >= 3:
-            # /stream/<chat_id>/<message_id>
             chat_id = segments[1]
             message_id = segments[2]
             use_chat = chat_id
@@ -178,13 +185,9 @@ async def stream_handler(request):
             else:
                 return web.Response(status=400, text="file_id streaming requires DEFAULT_CHAT_ID or explicit message reference")
 
-    except RPCError as rpc_e:
-        logger.exception("Telegram RPCError: %s", rpc_e)
-        return web.Response(status=500, text=f"Telegram RPC Error: {rpc_e}")
     except Exception as e:
         logger.exception("Unhandled exception: %s", e)
         return web.Response(status=500, text=f"Server error: {e}")
-
 
 async def init_app():
     await app.start()
@@ -196,10 +199,8 @@ async def init_app():
     ])
     return server
 
-
 def main():
     web.run_app(init_app(), host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
 
 if __name__ == "__main__":
     main()
