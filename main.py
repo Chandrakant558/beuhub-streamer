@@ -18,74 +18,97 @@ API_ID = int(os.environ.get("API_ID", "33833846"))
 API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4")
 DEFAULT_CHAT_ID = int(os.environ.get("CHANNEL_ID", "-1003266040653"))
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024)) 
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", 1024 * 1024))  # keep <= 1MiB for stream_media
 
 app = Client("beuhub_streamer", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- Helpers ---
 def parse_range(range_header: str, file_size: int):
+    """
+    Returns (start, end, is_partial)
+    """
     if not range_header:
-        return 0, file_size - 1
+        return 0, file_size - 1, False
     try:
         r = range_header.strip().lower()
         if not r.startswith("bytes="):
-            return 0, file_size - 1
+            return 0, file_size - 1, False
         r = r.replace("bytes=", "")
         start_str, end_str = r.split("-", 1)
         start = int(start_str) if start_str else 0
         end = int(end_str) if end_str else file_size - 1
         start = max(0, start)
         end = min(end, file_size - 1)
-        return start, end
-    except:
-        return 0, file_size - 1
+        if start > end:
+            return 0, file_size - 1, False
+        return start, end, not (start == 0 and end == file_size - 1)
+    except Exception:
+        return 0, file_size - 1, False
 
 def get_media_details(message):
     media = message.video or message.document or message.audio
     if media:
         return (
-            media, 
-            getattr(media, "file_size", 0), 
-            getattr(media, "mime_type", "application/octet-stream"), 
-            getattr(media, "file_name", "video.mp4")
+            media,
+            getattr(media, "file_size", 0),
+            getattr(media, "mime_type", "application/octet-stream"),
+            getattr(media, "file_name", "file.bin")
         )
     return None, 0, None, None
 
-async def stream_message(request, message, media, file_size, mime_type, file_name, start, end):
+async def stream_message(request, message, file_size, mime_type, file_name, start, end, is_partial):
     length = end - start + 1
+
+    # Build headers
     headers = {
-        "Content-Type": mime_type,
-        "Content-Length": str(length),
         "Accept-Ranges": "bytes",
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Content-Disposition": f'inline; filename="{file_name}"',
+        "Content-Disposition": f'inline; filename="{file_name}"'
     }
-    
-    resp = web.StreamResponse(status=206, headers=headers)
+    if is_partial:
+        headers.update({
+            "Content-Type": mime_type,
+            "Content-Length": str(length),
+            "Content-Range": f"bytes {start}-{end}/{file_size}"
+        })
+        status = 206
+    else:
+        headers.update({
+            "Content-Type": mime_type,
+            "Content-Length": str(file_size)
+        })
+        status = 200
+
+    # If this is a HEAD request, return headers only
+    if request.method == "HEAD":
+        return web.Response(status=status, headers=headers)
+
+    resp = web.StreamResponse(status=status, headers=headers)
     await resp.prepare(request)
-    
-    logger.info(f"⬇️ Starting download loop for bytes {start}-{end}")
+
+    logger.info(f"⬇️ Starting stream: bytes {start}-{end} (len={length}) for file '{file_name}'")
 
     try:
-        # Debug: Count chunks
-        chunk_count = 0
-        async for chunk in app.download_media(
-            message,
-            offset=start,
-            limit=length,
-            chunk_size=CHUNK_SIZE,
-            in_memory=True 
-        ):
+        # Use Pyrogram's stream_media to get chunk-by-chunk bytes
+        # stream_media yields up to ~1MiB chunks; offset and limit are in BYTES (use offset=start and limit=length)
+        chunk_counter = 0
+        async for chunk in app.stream_media(message, offset=start, limit=length, chunk_size=CHUNK_SIZE):
+            if not chunk:
+                break
             await resp.write(chunk)
-            chunk_count += 1
-            if chunk_count % 5 == 0:
-                logger.info(f"✅ Served {chunk_count} chunks...")
-                
+            chunk_counter += 1
+            # light heartbeat log
+            if chunk_counter % 8 == 0:
+                logger.info(f"✅ Sent {chunk_counter} chunks ({chunk_counter * CHUNK_SIZE} bytes approx)")
+
     except Exception as e:
         logger.error(f"❌ Streaming interrupted: {e}")
+        logger.error(traceback.format_exc())
     finally:
-        await resp.write_eof()
-        logger.info("🏁 Streaming finished")
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+        logger.info(f"🏁 Streaming finished; chunks_sent={chunk_counter}")
 
     return resp
 
@@ -94,16 +117,17 @@ async def home(request):
     return web.Response(text="BEUHub MTProto Streamer Running ✓")
 
 async def stream_handler(request):
-    # Log immediately when request hits
-    logger.info(f"🔔 REQUEST HIT: {request.rel_url}")
-    
+    logger.info(f"🔔 REQUEST HIT: {request.method} {request.rel_url}")
+
     try:
         segments = [s for s in request.rel_url.path.split("/") if s]
-        
-        if len(segments) == 2: 
+
+        if len(segments) == 2:
+            # /stream/<message_id>
             chat_id = DEFAULT_CHAT_ID
             message_id = int(segments[1])
-        elif len(segments) >= 3: 
+        elif len(segments) >= 3:
+            # /stream/<chat_id>/<message_id>
             chat_id = int(segments[1])
             message_id = int(segments[2])
         else:
@@ -111,7 +135,6 @@ async def stream_handler(request):
 
         logger.info(f"🔎 Looking for Chat: {chat_id}, Msg: {message_id}")
 
-        # Fetch Message
         try:
             message = await app.get_messages(int(chat_id), int(message_id))
         except Exception as e:
@@ -119,21 +142,25 @@ async def stream_handler(request):
             return web.Response(status=500, text=f"Telegram Error: {e}")
 
         if not message:
-            logger.error("❌ Message is None (Bot cannot see it)")
+            logger.error("❌ Message not found (bot might not have access)")
             return web.Response(status=404, text="Message Not Found")
-            
-        logger.info("✅ Message found! Extracting media...")
 
         media, file_size, mime_type, file_name = get_media_details(message)
-        
-        if not media:
-            logger.error("❌ No media found in message")
+        if not media or file_size == 0:
+            logger.error("❌ No media or zero-size media found in message")
             return web.Response(status=404, text="No Media")
 
-        logger.info(f"🎥 Media: {file_name} | Size: {file_size}")
+        # Parse Range header
+        range_header = request.headers.get("Range")
+        start, end, is_partial = parse_range(range_header, file_size)
 
-        start, end = parse_range(request.headers.get("Range"), file_size)
-        return await stream_message(request, message, media, file_size, mime_type, file_name, start, end)
+        # Sanity check bounds
+        start = max(0, min(start, file_size - 1))
+        end = max(start, min(end, file_size - 1))
+
+        logger.info(f"➡️ Serving bytes {start}-{end} (partial={is_partial}) mime={mime_type} size={file_size}")
+
+        return await stream_message(request, message, file_size, mime_type, file_name, start, end, is_partial)
 
     except Exception as e:
         tb = traceback.format_exc()
@@ -147,6 +174,7 @@ async def init_app():
     server = web.Application()
     server.add_routes([
         web.get("/", home),
+        web.head("/stream/{id:.*}", stream_handler),  # support HEAD probes
         web.get("/stream/{id:.*}", stream_handler),
     ])
     return server
