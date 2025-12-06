@@ -15,9 +15,10 @@ logger = logging.getLogger("beuhub_streamer")
 
 # --- CONFIG ---
 API_ID = int(os.environ.get("API_ID", "33833846"))
-API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446"))
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4"))
-CHUNK_SIZE = 1024 * 512  # 512KB Chunks (Balance speed)
+# FIX: Removed extra ')' from lines below
+API_HASH = os.environ.get("API_HASH", "08293ed11f6189993b0337b852ed1446")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8532091150:AAETyfRm0InvlHa-f4sFhdDB4y5_E5ZV8q4")
+CHUNK_SIZE = 1024 * 512  # 512KB Chunks
 
 app = Client("beuhub_streamer", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 
@@ -31,7 +32,7 @@ async def stream_handler(request):
         try:
             chat_id = int(raw_chat)
         except:
-            chat_id = raw_chat # Username
+            chat_id = raw_chat # Username support
 
         try:
             message_id = int(segments[2])
@@ -52,7 +53,6 @@ async def stream_handler(request):
         if not media: return web.Response(text="No Media Found", status=404)
 
         file_size = getattr(media, "file_size", 0)
-        # Force MP4 mime type agar detect na ho
         mime_type = getattr(media, "mime_type", "video/mp4") 
         file_name = getattr(media, "file_name", "video.mp4")
 
@@ -64,7 +64,7 @@ async def stream_handler(request):
             "Connection": "keep-alive"
         }
 
-        # Status 200 OK (Not 206)
+        # Status 200 OK (Best for instant play)
         resp = web.StreamResponse(status=200, headers=headers)
         await resp.prepare(request)
 
